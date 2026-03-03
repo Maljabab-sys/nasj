@@ -33,6 +33,9 @@ export function useAnnotation(imageDataURL) {
   const previewStrokeRef = useRef(null)
   const hiddenStrokeIdxRef = useRef(-1)
 
+  // Keep a ref to the latest redraw so the ResizeObserver always uses current strokes
+  const redrawRef = useRef(null)
+
   // Redraw everything on the canvas
   const redraw = useCallback(
     (pendingPoints = null) => {
@@ -94,6 +97,9 @@ export function useAnnotation(imageDataURL) {
     [strokes],
   )
 
+  // Always keep redrawRef pointing to the latest redraw
+  redrawRef.current = redraw
+
   // Resize canvas to match display size with DPR
   useEffect(() => {
     const canvas = canvasRef.current
@@ -105,7 +111,8 @@ export function useAnnotation(imageDataURL) {
       canvas.height = rect.height * dpr
       const ctx = canvas.getContext('2d')
       ctx.scale(dpr, dpr)
-      redraw()
+      // Use ref to always call the latest redraw (avoids stale closure)
+      redrawRef.current?.()
     }
     resize()
     const observer = new ResizeObserver(resize)
@@ -249,8 +256,16 @@ export function useAnnotation(imageDataURL) {
     setStrokes((prev) => [...prev, stroke])
   }, [])
 
-  const addTextStroke = useCallback(({ text, x, y, fontSize, fontFamily, color, bgColor, textAlign, direction, bgShape }) => {
-    setStrokes((prev) => [...prev, { type: 'text', text, x, y, fontSize, fontFamily, color, bgColor, textAlign, direction, bgShape }])
+  const addTextStroke = useCallback(({ text, x, y, fontSize, fontFamily, color, bgColor, textAlign, direction, bgShape, templateId }) => {
+    setStrokes((prev) => [...prev, { type: 'text', text, x, y, fontSize, fontFamily, color, bgColor, textAlign, direction, bgShape, ...(templateId ? { templateId } : {}) }])
+  }, [])
+
+  const removeTemplateStrokes = useCallback(() => {
+    setStrokes((prev) => prev.filter((s) => !s.templateId))
+  }, [])
+
+  const replaceTemplateStrokes = useCallback((newStrokes) => {
+    setStrokes((prev) => [...prev.filter((s) => !s.templateId), ...newStrokes])
   }, [])
 
   const setPreviewStroke = useCallback((stroke) => {
@@ -307,6 +322,8 @@ export function useAnnotation(imageDataURL) {
     clearAll,
     addArchStroke,
     addTextStroke,
+    removeTemplateStrokes,
+    replaceTemplateStrokes,
     updateStroke,
     setPreviewStroke,
     hideStroke,

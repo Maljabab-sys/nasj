@@ -19,7 +19,13 @@ export async function generateCroppedDataURL(rawDataURL, { scale = 1, offsetX = 
   const imgW = img.naturalWidth
   const imgH = img.naturalHeight
 
-  const slotRatio = containerW && containerH ? containerW / containerH : 1
+  // Fallback: if container dimensions are missing, use image natural size
+  if (!containerW || !containerH) {
+    containerW = imgW
+    containerH = imgH
+  }
+
+  const slotRatio = containerW / containerH
   const imgRatio = imgW / imgH
 
   // Object-contain fit: image fits WITHIN the container at scale=1

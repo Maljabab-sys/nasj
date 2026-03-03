@@ -7,26 +7,32 @@ import NavBar from './components/NavBar'
 import Stagger from './components/Stagger'
 import UploadPage from './pages/UploadPage'
 import CaptionPage from './pages/CaptionPage'
+import CaptionResultsPage from './pages/CaptionResultsPage'
 import ReviewPage from './pages/ReviewPage'
-import { useCaptionGenerator } from './features/caption/useCaptionGenerator'
+import { useBatchCaptionGenerator } from './features/caption/useBatchCaptionGenerator'
 import { cacheGet, cacheSet, cacheClear } from './utils/sessionCache'
 
-const INITIAL_STATE = {
-  step: 1,
+export const EMPTY_POST = {
+  id: null,
+  postType: 'single',       // 'beforeafter' | 'single'
+  layoutMode: 'single',     // 'stacked' | 'sidebyside' | 'single'
+  format: 'square',        // 'square' | 'portrait' | 'story'
   beforeCropped: null,
   afterCropped: null,
   beforeStrokes: [],
   afterStrokes: [],
-  layoutMode: 'stacked',
   singleTarget: null,
-  format: 'square',
-  category: null,
-  postType: null,
   watermarkText: '',
   bgColor: 'white',
   selectedTemplate: 'classic',
   selectedCaption: null,
   selectedHashtags: [],
+}
+
+const INITIAL_STATE = {
+  step: 1,
+  multiMode: 'single',     // 'single' | 'multiple'
+  posts: [{ ...EMPTY_POST, id: 'post-0' }],
 }
 
 export default function App() {
@@ -35,7 +41,7 @@ export default function App() {
   const loaded = useRef(false)
   const { t, lang } = useLanguage()
   const { isDark } = useTheme()
-  const captionGen = useCaptionGenerator()
+  const batchGen = useBatchCaptionGenerator()
 
   // ── Nav bar state ─────────────────────────────────────────────────────
   const navActionsRef = useRef({ back: null, next: null })
@@ -57,33 +63,53 @@ export default function App() {
     })
   }, [])
 
-  // Set nav for step 3 (steps 1+2 managed by their pages via onNavUpdate)
+  // Set nav for step 4 / ReviewPage (steps 1-3 managed by their pages via onNavUpdate)
   useEffect(() => {
-    if (state.step === 3) {
+    if (state.step === 4) {
       updateNav({
-        backLabel: t.btnBackCaption || 'Back',
-        onBack: () => update({ step: 2 }),
+        backLabel: t.btnBackResults || 'Back',
+        onBack: () => update({ step: 3 }),
       })
     }
-  }, [state.step, t.btnBackCaption, updateNav]) // eslint-disable-line
+  }, [state.step, t.btnBackResults, updateNav]) // eslint-disable-line
 
-  const progress = ((state.step - 1 + (state.step === 1 ? subProgress : 1)) / 3) * 100
+  const progress = ((state.step - 1 + (state.step === 1 ? subProgress : 1)) / 4) * 100
 
   // Restore cached app state on mount
   useEffect(() => {
     cacheGet('app').then((cached) => {
       if (cached) {
-        if (cached.bgColor === 'black') cached.bgColor = 'white'
-        setState((prev) => ({ ...prev, ...cached }))
+        // Migrate old flat state to new posts-array format
+        if (cached.beforeCropped !== undefined && !cached.posts) {
+          const { step, category, ...postFields } = cached
+          if (postFields.bgColor === 'black') postFields.bgColor = 'white'
+          setState((prev) => ({
+            ...prev,
+            step: step || 1,
+            multiMode: 'single',
+            posts: [{ ...EMPTY_POST, id: 'post-0', ...postFields }],
+          }))
+        } else {
+          setState((prev) => ({ ...prev, ...cached }))
+        }
       }
       loaded.current = true
     }).catch(() => { loaded.current = true })
   }, [])
 
-  // Save app state whenever it changes
+  // Save app state whenever it changes (strip large data URLs to keep cache small)
   useEffect(() => {
     if (!loaded.current) return
-    cacheSet('app', state).catch(() => {})
+    const cacheable = {
+      step: state.step,
+      multiMode: state.multiMode,
+      posts: state.posts.map((p) => ({
+        ...p,
+        beforeCropped: null,
+        afterCropped: null,
+      })),
+    }
+    cacheSet('app', cacheable).catch(() => {})
   }, [state])
 
   function update(patch) {
@@ -97,7 +123,7 @@ export default function App() {
   const handleSubProgress = useCallback((p) => setSubProgress(p), [])
 
   return (
-    <div className="flex flex-col min-h-screen bg-stone-50 dark:bg-[#0f0f0f]">
+    <div className="flex flex-col min-h-dvh bg-stone-50 dark:bg-[#0f0f0f]">
       <Stagger gap={70} start={0} getClassName={(i) => i === 2 ? 'flex-1 flex flex-col min-h-0' : ''}>
         <Header />
         <NavBar
@@ -113,8 +139,10 @@ export default function App() {
           <div className={state.step === 1 ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>
             <UploadPage
               step={state.step}
-              onNext={({ beforeCropped, afterCropped, beforeStrokes, afterStrokes, layoutMode, singleTarget, format, category, postType, watermarkText, bgColor, selectedTemplate }) =>
-                update({ beforeCropped, afterCropped, beforeStrokes, afterStrokes, layoutMode, singleTarget, format, category, postType, watermarkText, bgColor, selectedTemplate, step: 2 })
+              initialPosts={state.posts}
+              initialMultiMode={state.multiMode}
+              onNext={({ posts, multiMode }) =>
+                update({ posts, multiMode, step: 2 })
               }
               onSubProgress={handleSubProgress}
               onNavUpdate={updateNav}
@@ -124,37 +152,39 @@ export default function App() {
           {state.step === 2 && (
             <CaptionPage
               lang={lang}
-              captionGen={captionGen}
-              onNext={({ selectedCaption, selectedHashtags }) =>
-                update({ selectedCaption, selectedHashtags, step: 3 })
-              }
+              batchGen={batchGen}
+              posts={state.posts}
+              onNext={() => update({ step: 3 })}
               onBack={() => update({ step: 1 })}
-              onSkip={() => update({ selectedCaption: null, selectedHashtags: [], step: 3 })}
+              onSkip={() => update({
+                posts: state.posts.map((p) => ({ ...p, selectedCaption: null, selectedHashtags: [] })),
+                step: 4,
+              })}
               onNavUpdate={updateNav}
             />
           )}
 
           {state.step === 3 && (
-            <ReviewPage
-              beforeCropped={state.beforeCropped}
-              afterCropped={state.afterCropped}
-              beforeStrokes={state.beforeStrokes}
-              afterStrokes={state.afterStrokes}
-              layoutMode={state.layoutMode}
-              singleTarget={state.singleTarget}
-              format={state.format}
-              watermarkText={state.watermarkText}
-              bgColor={state.bgColor}
-              selectedTemplate={state.selectedTemplate}
-              selectedCaption={state.selectedCaption}
-              selectedHashtags={state.selectedHashtags}
+            <CaptionResultsPage
+              lang={lang}
+              batchGen={batchGen}
+              posts={state.posts}
+              onNext={({ posts }) => update({ posts, step: 4 })}
               onBack={() => update({ step: 2 })}
+              onNavUpdate={updateNav}
+            />
+          )}
+
+          {state.step === 4 && (
+            <ReviewPage
+              posts={state.posts}
+              onBack={() => update({ step: 3 })}
               onClearSession={handleClearSession}
             />
           )}
         </main>
 
-        {state.step === 3 ? <Footer /> : null}
+        {state.step === 4 ? <Footer /> : null}
       </Stagger>
     </div>
   )

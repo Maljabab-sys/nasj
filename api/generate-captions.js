@@ -1,21 +1,56 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { GoogleGenAI } from '@google/genai'
 
-const client = new Anthropic()
+const anthropic = new Anthropic()
+const gemini = new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY })
 
-function buildSystemPrompt(lang, target) {
+const PLATFORM_INSTRUCTIONS = {
+  instagram: {
+    name: 'Instagram',
+    captionStyle: '2–4 sentences, professional yet engaging.',
+    emojiCount: '1–3 emojis per caption',
+    hashtagCount: '15–20 hashtags',
+    note: '',
+  },
+  tiktok: {
+    name: 'TikTok',
+    captionStyle: '1–2 short punchy sentences with a hook. Use trending expressions. Feel energetic and youthful.',
+    emojiCount: '2–5 emojis per caption',
+    hashtagCount: '5–10 hashtags',
+    note: 'TikTok captions should have a strong opening hook to grab attention immediately.',
+  },
+  snapchat: {
+    name: 'Snapchat',
+    captionStyle: '1 very short casual sentence (max 80 characters). Conversational and fun.',
+    emojiCount: '1–2 emojis per caption',
+    hashtagCount: '0–3 hashtags',
+    note: 'Snapchat captions are minimal — skip hashtags if they feel unnatural.',
+  },
+  twitter: {
+    name: 'Twitter / X',
+    captionStyle: '1 punchy sentence under 220 characters total (leave room for hashtags). Direct and impactful.',
+    emojiCount: '0–2 emojis per caption',
+    hashtagCount: '1–3 hashtags only',
+    note: 'Twitter/X has a 280-character limit — keep the entire caption short.',
+  },
+}
+
+function buildSystemPrompt(lang, target, platform, accent) {
   const isArabic = lang === 'ar'
+  const p = PLATFORM_INSTRUCTIONS[platform] || PLATFORM_INSTRUCTIONS.instagram
+  const accentNote = ACCENT_INSTRUCTIONS[accent] || ''
 
   const captionRules = `- ${isArabic ? 'Write captions in Arabic.' : 'Write captions in English.'}
-- Captions should be 2–4 sentences, professional yet engaging for Instagram.
-- Include relevant emojis sparingly (1–3 per caption).
+- Platform: ${p.name}. ${p.captionStyle}
+- Include relevant emojis (${p.emojiCount}).
 - Each caption must have a different tone: (1) professional/educational, (2) warm/friendly, (3) motivational/aspirational.
-- CRITICAL: Only use real, commonly used words. Never invent, fabricate, or transliterate words. If you are unsure about a word, use a simpler alternative.${isArabic ? ' For technical/foreign terms, use the widely accepted Arabic equivalent or keep the English term as-is.' : ''}`
+${accentNote ? `- IMPORTANT — Dialect rule (applies to ALL 3 captions, including the professional one): ${accentNote}\n` : ''}${p.note ? `- ${p.note}\n` : ''}- CRITICAL: Only use real, commonly used words. Never invent, fabricate, or transliterate words. If you are unsure about a word, use a simpler alternative.${isArabic ? ' For technical/foreign terms, use the widely accepted Arabic equivalent or keep the English term as-is.' : ''}`
 
   const hashtagRules = `- Hashtags should be relevant to the content described by the user.
 - Mix popular broad hashtags with niche-specific ones.
 - All hashtags must start with #. No duplicates.`
 
-  const role = 'You are an expert social media content writer who creates engaging Instagram captions and hashtags.'
+  const role = `You are an expert social media content writer who creates engaging ${p.name} captions and hashtags.`
 
   if (target === 'captions') {
     return `${role}
@@ -31,7 +66,7 @@ ${captionRules}`
 
 Rules:
 - Return ONLY valid JSON. No markdown fences, no explanation, no extra text.
-- The JSON must have exactly one key: "hashtags" (array of 15–20 strings).
+- The JSON must have exactly one key: "hashtags" (array of ${p.hashtagCount.replace('–', '–')} strings).
 ${hashtagRules}`
   }
 
@@ -39,7 +74,7 @@ ${hashtagRules}`
 
 Rules:
 - Return ONLY valid JSON. No markdown fences, no explanation, no extra text.
-- The JSON must have exactly two keys: "captions" (array of exactly 3 strings) and "hashtags" (array of 15–20 strings).
+- The JSON must have exactly two keys: "captions" (array of exactly 3 strings) and "hashtags" (array of ${p.hashtagCount} strings).
 ${captionRules}
 ${hashtagRules}`
 }
@@ -51,33 +86,107 @@ const ACCENT_INSTRUCTIONS = {
   egyptian: 'Write in Egyptian dialect and cultural style. Use well-known Egyptian expressions (e.g. تحفة, جامد, يا سلام). Keep technical terms in their original English form rather than inventing Arabic transliterations.',
 }
 
-function buildUserPrompt({ description, lang, accent, target }) {
+function buildUserPrompt({ description, lang, accent, target, platform, hasImages }) {
   const isArabic = lang === 'ar'
   const langNote = isArabic
     ? 'Write captions in Arabic.'
     : 'Write captions in English.'
 
   const accentNote = ACCENT_INSTRUCTIONS[accent] || ''
+  const p = PLATFORM_INSTRUCTIONS[platform] || PLATFORM_INSTRUCTIONS.instagram
 
   let whatToGenerate, jsonShape
   if (target === 'captions') {
-    whatToGenerate = '3 Instagram captions'
+    whatToGenerate = `3 ${p.name} captions`
     jsonShape = '{"captions": ["...", "...", "..."]}'
   } else if (target === 'hashtags') {
-    whatToGenerate = '15–20 hashtags'
+    whatToGenerate = `${p.hashtagCount} hashtags for ${p.name}`
     jsonShape = '{"hashtags": ["#...", "#...", ...]}'
   } else {
-    whatToGenerate = '3 Instagram captions and 15–20 hashtags'
+    whatToGenerate = `3 ${p.name} captions and ${p.hashtagCount} hashtags`
     jsonShape = '{"captions": ["...", "...", "..."], "hashtags": ["#...", "#...", ...]}'
   }
 
+  const imageContext = hasImages
+    ? '\n\nI have attached photos. Carefully analyze the images and write captions that accurately describe what you see in them. Base the captions on the actual visual content of the photos.'
+    : ''
+
   return `Generate ${whatToGenerate} based on the following description:
 
-"${description}"
+"${description}"${imageContext}
 
 Language: ${langNote}${accentNote ? `\nStyle: ${accentNote}` : ''}
 
 Return JSON only: ${jsonShape}`
+}
+
+// ── Parse data URL into mimeType + base64 ────────────────────────────────────
+function parseDataURL(dataURL) {
+  if (!dataURL || typeof dataURL !== 'string') return null
+  const match = dataURL.match(/^data:(image\/[^;]+);base64,(.+)$/)
+  if (!match) return null
+  return { mimeType: match[1], data: match[2] }
+}
+
+// ── Provider: Claude ──────────────────────────────────────────────────────────
+async function callClaude(systemPrompt, userPrompt, maxTokens, model = 'claude-sonnet-4-6', images = []) {
+  const content = []
+  for (const img of images) {
+    const parsed = parseDataURL(img)
+    if (parsed) {
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: parsed.mimeType, data: parsed.data },
+      })
+    }
+  }
+  content.push({ type: 'text', text: userPrompt })
+
+  const message = await anthropic.messages.create({
+    model,
+    max_tokens: maxTokens,
+    system: systemPrompt,
+    messages: [{ role: 'user', content }],
+  })
+  return message.content[0].text
+}
+
+// ── Provider: Gemini ──────────────────────────────────────────────────────────
+async function callGemini(systemPrompt, userPrompt, images = []) {
+  const contents = []
+  for (const img of images) {
+    const parsed = parseDataURL(img)
+    if (parsed) {
+      contents.push({ inlineData: { mimeType: parsed.mimeType, data: parsed.data } })
+    }
+  }
+  contents.push({ text: userPrompt })
+
+  const response = await gemini.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents,
+    config: {
+      systemInstruction: systemPrompt,
+      maxOutputTokens: 4096,
+      responseMimeType: 'application/json',
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  })
+  return response.text
+}
+
+// ── Extract JSON from raw text ────────────────────────────────────────────────
+function extractJSON(rawText) {
+  let text = rawText.trim()
+  const fenceMatch = text.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/)
+  if (fenceMatch) text = fenceMatch[1].trim()
+  if (!text.startsWith('{')) {
+    const braceMatch = text.match(/\{[\s\S]*\}/)
+    if (braceMatch) text = braceMatch[0]
+  }
+  // Fix trailing commas before ] or } (common LLM output error)
+  text = text.replace(/,\s*([\]}])/g, '$1')
+  return JSON.parse(text)
 }
 
 export default async function handler(req, res) {
@@ -85,41 +194,35 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const { description, lang, accent, target } = req.body
+  const { description, lang, accent, target, platform, provider, images } = req.body
   const validTarget = ['captions', 'hashtags', 'both'].includes(target) ? target : 'both'
+  const validPlatform = ['instagram', 'tiktok', 'snapchat', 'twitter'].includes(platform) ? platform : 'instagram'
+  const validProvider = ['claude', 'haiku', 'gemini'].includes(provider) ? provider : 'claude'
+  const validImages = Array.isArray(images) ? images.filter(img => typeof img === 'string' && img.startsWith('data:image/')) : []
+  const hasImages = validImages.length > 0
 
-  if (!description || !description.trim()) {
-    return res.status(400).json({ error: 'Missing required field: description' })
+  if ((!description || !description.trim()) && !hasImages) {
+    return res.status(400).json({ error: 'Missing required field: description or images' })
   }
 
-  const systemPrompt = buildSystemPrompt(lang || 'en', validTarget)
-  const userPrompt = buildUserPrompt({ description: description.trim(), lang: lang || 'en', accent: accent || 'neutral', target: validTarget })
+  // Check Gemini API key availability
+  if (validProvider === 'gemini' && !process.env.GOOGLE_AI_API_KEY) {
+    return res.status(500).json({ error: 'Gemini API key not configured. Set GOOGLE_AI_API_KEY.' })
+  }
 
-  // Use fewer tokens when only generating one piece
-  const maxTokens = validTarget === 'both' ? 1024 : 512
+  const systemPrompt = buildSystemPrompt(lang || 'en', validTarget, validPlatform, accent || 'neutral')
+  const desc = (description && description.trim()) || (hasImages ? 'Describe what you see in the attached photos' : '')
+  const userPrompt = buildUserPrompt({ description: desc, lang: lang || 'en', accent: accent || 'neutral', target: validTarget, platform: validPlatform, hasImages })
+  const maxTokens = validTarget === 'both' ? 2048 : 1024
 
   try {
-    const message = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    })
+    const rawText = validProvider === 'gemini'
+      ? await callGemini(systemPrompt, userPrompt, validImages)
+      : await callClaude(systemPrompt, userPrompt, maxTokens,
+          validProvider === 'haiku' ? 'claude-haiku-4-5-20251001' : 'claude-sonnet-4-6',
+          validImages)
 
-    const rawText = message.content[0].text
-
-    // Strip markdown fences (```json ... ``` or ``` ... ```) if present
-    let text = rawText.trim()
-    const fenceMatch = text.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/)
-    if (fenceMatch) text = fenceMatch[1].trim()
-
-    // As a fallback, extract the first { ... } block
-    if (!text.startsWith('{')) {
-      const braceMatch = text.match(/\{[\s\S]*\}/)
-      if (braceMatch) text = braceMatch[0]
-    }
-
-    const parsed = JSON.parse(text)
+    const parsed = extractJSON(rawText)
 
     // Build response based on what was requested
     const result = {}
@@ -129,7 +232,8 @@ export default async function handler(req, res) {
     }
     if (validTarget !== 'captions') {
       if (!Array.isArray(parsed.hashtags)) throw new Error('Invalid response: missing hashtags')
-      result.hashtags = parsed.hashtags.slice(0, 20)
+      const maxHashtags = validPlatform === 'twitter' ? 3 : validPlatform === 'snapchat' ? 3 : validPlatform === 'tiktok' ? 10 : 20
+      result.hashtags = parsed.hashtags.slice(0, maxHashtags)
     }
 
     return res.status(200).json(result)
@@ -139,15 +243,15 @@ export default async function handler(req, res) {
     let detail = err.message || 'Unknown error'
     let status = 500
 
-    // Anthropic SDK errors have a status property
+    // Anthropic SDK errors
     if (err.status === 401) {
-      detail = 'Invalid API key. Check ANTHROPIC_API_KEY.'
+      detail = validProvider === 'gemini' ? 'Invalid Google AI API key.' : 'Invalid API key. Check ANTHROPIC_API_KEY.'
       status = 401
     } else if (err.status === 429) {
       detail = 'Rate limited. Please wait a moment and try again.'
       status = 429
     } else if (err.status === 529 || err.status === 503) {
-      detail = 'Anthropic API is temporarily overloaded. Try again shortly.'
+      detail = 'API is temporarily overloaded. Try again shortly.'
       status = 503
     } else if (err.name === 'SyntaxError') {
       detail = 'AI returned invalid JSON. Please try again.'

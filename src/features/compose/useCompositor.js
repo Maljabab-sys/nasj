@@ -1,6 +1,5 @@
 import { OUTPUT_SIZES } from '../../constants/layout'
 import { drawAnnotationsOnto } from '../annotation/drawAnnotations'
-import { getTemplateById } from './templates'
 
 function loadImage(src) {
   return new Promise((resolve, reject) => {
@@ -105,11 +104,7 @@ export async function composite({
     await drawSingleLayout(ctx, W, H, dataURL, strokes)
   }
 
-  // Apply template overlay (labels + watermark)
-  const template = getTemplateById(templateId)
-  if (template.drawOverlay) {
-    template.drawOverlay(ctx, W, H, layoutMode, watermarkText, singleTarget, labels)
-  }
+  // Template labels + watermark are now editable text strokes, drawn with annotations above
 
   return canvas
 }

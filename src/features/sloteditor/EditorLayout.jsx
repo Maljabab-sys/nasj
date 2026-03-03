@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
-import { Move, Pencil, Type, Zap, Undo2, ZoomIn, ZoomOut, Paintbrush, LayoutTemplate, Upload, ImagePlus } from 'lucide-react'
+import { Move, Pencil, Type, Undo2, ZoomIn, ZoomOut, Paintbrush, LayoutTemplate, Upload, ImagePlus, Sparkles, Loader2, X, ImageUp, ChevronDown, RefreshCw } from 'lucide-react'
 import { useLanguage } from '../../i18n/LanguageContext'
 import { DEFAULT_DOCTOR_NAME } from '../../constants/layout'
 import { DRAW_COLORS, DRAW_LINE_WIDTHS, DASH_PATTERN } from '../../constants/annotation'
+import { useImageGenerator } from './useImageGenerator'
 import SidebarButton from './SidebarButton'
 import PhotoPanel from './PhotoPanel'
 import InlineToolbar from './InlineToolbar'
@@ -54,37 +55,83 @@ function MobileNavBtn({ icon, label, active, disabled, onClick }) {
 
 export default function EditorLayout({
   // State
-  images, slotData, selectedImageId, selectedTemplate,
-  watermarkText, format, bulkDragging,
+  images, posts, slotDataMap, activePostId, onActivePostChange,
+  selectedImageId, selectedTemplate,
+  watermarkText, bulkDragging,
   dragOver, lang,
   // Active slot
   effectiveActiveSlot, activeState, activeRef,
   // Refs
-  inputRef, beforeSlotRef, afterSlotRef, singleSlotRef,
+  inputRef,
   // Callbacks
   onFileInput, onBulkDrop, setBulkDragging,
   onRemoveImage, onGalleryDragStart, onGalleryTap,
   onTemplateTap, onTemplateDrop, onTemplateDragOver, onSetDragOver,
   onToolbarModeChange, onToolbarBgChange, drawSettings, onDrawSettingsChange, onTemplateChange, onWatermarkChange,
+  // AI Image
+  onAIImageGenerated,
+  onAIImageForPost,
   // Render
-  renderTemplate, fmtStyle, templateRatio,
+  renderTemplateForPost,
 }) {
   const { t } = useLanguage()
-  const [photoPanelOpen, setPhotoPanelOpen] = useState(true)
-  const [activePopover, setActivePopover] = useState(null) // null | 'ai' | 'bg' | 'template' | 'draw'
-  const [mobileTab, setMobileTab] = useState(null) // null | 'uploads' | 'draw' | 'ai' | 'bg' | 'template'
+
+  // Flatten slotDataMap into a pseudo-flat object so PhotoPanel's inSlot check works
+  const flatSlotData = {}
+  if (slotDataMap) {
+    let idx = 0
+    for (const pid of Object.keys(slotDataMap)) {
+      const postSlots = slotDataMap[pid]
+      if (!postSlots) continue
+      for (const key of Object.keys(postSlots)) {
+        if (postSlots[key]) flatSlotData[`${pid}-${key}-${idx++}`] = postSlots[key]
+      }
+    }
+  }
+
+  const [photoPanelOpen, setPhotoPanelOpen] = useState(false)
+  const [activePopover, setActivePopover] = useState(null) // null | 'ai' | 'bg' | 'template' | 'draw' | 'aiImage'
+  const [mobileTab, setMobileTab] = useState(null) // null | 'uploads' | 'draw' | 'ai' | 'bg' | 'template' | 'aiImage'
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [aiModel, setAiModel] = useState('imagen-4.0-fast-generate-001')
+  const [aiModelOpen, setAiModelOpen] = useState(false)
+  const [aiRefImage, setAiRefImage] = useState(null) // { name, dataURL }
+  const aiFileRef = useRef(null)
+  const aiModelRef = useRef(null)
+  const lastAiSettingsRef = useRef(null) // { prompt, model, refImage } — preserved after generation
+
+  // AI Image generation hook
+  const { generate: generateAIImage, generateBatch, isLoading: aiImageLoading, error: aiImageError, clearError: clearAIImageError, elapsed: aiElapsed, cancel: cancelAIImage, batchProgress } = useImageGenerator()
 
   // Refs for outside-click detection
-  const aiRef = useRef(null)
+  const aiImageRef = useRef(null)
   const bgRef = useRef(null)
   const templateRef = useRef(null)
   const drawRef = useRef(null)
+
+  const AI_MODEL_OPTIONS = [
+    { value: 'imagen-4.0-fast-generate-001', label: t.aiModelImagen4 || 'Imagen 4 Fast', sub: t.aiModelImagen4Sub || 'Fastest', color: 'text-green-500' },
+    { value: 'gemini-2.5-flash-image', label: t.aiModelFlash25 || 'Gemini 2.5 Flash', sub: t.aiModelFlash25Sub || 'Fast & Stable', color: 'text-blue-500' },
+    { value: 'gemini-3.1-flash-image-preview', label: t.aiModelFlash || 'Gemini 3.1 Flash', sub: t.aiModelFlashSub || 'Fast', color: 'text-cyan-500' },
+    { value: 'gemini-3-pro-image-preview', label: t.aiModelPro || 'Gemini 3 Pro', sub: t.aiModelProSub || 'Best Quality', color: 'text-purple-500' },
+  ]
+  const activeAiModel = AI_MODEL_OPTIONS.find((m) => m.value === aiModel) || AI_MODEL_OPTIONS[0]
+
+  // Close AI model picker on outside click
+  useEffect(() => {
+    if (!aiModelOpen) return
+    function handleClick(e) {
+      if (aiModelRef.current && !aiModelRef.current.contains(e.target)) setAiModelOpen(false)
+    }
+    document.addEventListener('pointerdown', handleClick)
+    return () => document.removeEventListener('pointerdown', handleClick)
+  }, [aiModelOpen])
 
   // Close popover on outside click
   useEffect(() => {
     if (!activePopover) return
     function handleClick(e) {
-      const refMap = { ai: aiRef, bg: bgRef, template: templateRef, draw: drawRef }
+      const refMap = { aiImage: aiImageRef, bg: bgRef, template: templateRef, draw: drawRef }
       const ref = refMap[activePopover]
       if (ref?.current && !ref.current.contains(e.target)) setActivePopover(null)
     }
@@ -106,6 +153,7 @@ export default function EditorLayout({
 
   function togglePopover(name) {
     setActivePopover((prev) => (prev === name ? null : name))
+    setAiModelOpen(false)
   }
 
   function handleAutoArch(type) {
@@ -116,6 +164,83 @@ export default function EditorLayout({
   function handleBgSelect(bg) {
     onToolbarBgChange(bg)
     setActivePopover(null)
+  }
+
+  // Get the active post object
+  const activePost = posts?.find((p) => p.id === activePostId) || posts?.[0]
+
+  async function handleAIImageGenerate() {
+    if (!aiPrompt.trim() || aiImageLoading) return
+    lastAiSettingsRef.current = { prompt: aiPrompt, model: aiModel, refImage: aiRefImage }
+    const result = await generateAIImage({ prompt: aiPrompt, model: aiModel, image: aiRefImage?.dataURL, format: activePost?.format })
+    if (result?.imageDataURL) {
+      onAIImageGenerated?.(result.imageDataURL, result.textOverlays || [])
+      setAiPrompt('')
+      setAiRefImage(null)
+      setActivePopover(null)
+      setMobileTab(null)
+    }
+  }
+
+  async function handleAIBatchGenerate() {
+    if (!aiPrompt.trim() || aiImageLoading || !posts || posts.length < 2) return
+    lastAiSettingsRef.current = { prompt: aiPrompt, model: aiModel, refImage: aiRefImage }
+    await generateBatch({
+      prompt: aiPrompt,
+      model: aiModel,
+      image: aiRefImage?.dataURL,
+      posts: posts.map((p) => ({ format: p.format, postType: p.postType })),
+      onEach: (index, result) => {
+        if (result?.imageDataURL && posts[index]) {
+          onAIImageForPost?.(posts[index].id, result.imageDataURL, result.textOverlays || [])
+        }
+      },
+    })
+    setAiPrompt('')
+    setAiRefImage(null)
+    setActivePopover(null)
+    setMobileTab(null)
+  }
+
+  // Track which post is currently regenerating
+  const [regeneratingPostId, setRegeneratingPostId] = useState(null)
+
+  async function handleRegenerateForPost(post) {
+    const settings = lastAiSettingsRef.current
+    if (!settings?.prompt?.trim() || aiImageLoading) return
+    setRegeneratingPostId(post.id)
+    try {
+      const result = await generateAIImage({
+        prompt: settings.prompt,
+        model: settings.model,
+        image: settings.refImage?.dataURL,
+        format: post.format,
+      })
+      if (result?.imageDataURL) {
+        onAIImageForPost?.(post.id, result.imageDataURL, result.textOverlays || [])
+      }
+    } finally {
+      setRegeneratingPostId(null)
+    }
+  }
+
+  function handleAIFileSelect(e) {
+    const file = e.target.files?.[0]
+    if (!file || !file.type.startsWith('image/')) return
+    const reader = new FileReader()
+    reader.onload = (ev) => setAiRefImage({ name: file.name, dataURL: ev.target.result })
+    reader.readAsDataURL(file)
+    e.target.value = ''
+  }
+
+  const isOverloadError = aiImageError && (aiImageError.includes('overloaded') || aiImageError.includes('temporarily') || aiImageError.includes('Rate limited'))
+
+  function handleSwitchModel() {
+    const other = AI_MODEL_OPTIONS.find((m) => m.value !== aiModel)
+    if (other) {
+      setAiModel(other.value)
+      clearAIImageError()
+    }
   }
 
   function handleTemplateSelect(id) {
@@ -140,29 +265,103 @@ export default function EditorLayout({
   // ── Current mode from active slot ────────────────────────────────────────
   const currentMode = activeState?.mode || 'move'
 
-  // ── Template max-width based on format ───────────────────────────────────
-  const templateMaxW = format === 'story' ? 340 : format === 'portrait' ? 420 : 480
-
   // ── Canvas area content (shared between desktop + mobile) ─────────────────
+  const FORMAT_RATIOS_MAP = { square: '1/1', portrait: '4/5', story: '9/16' }
+  const FORMAT_LABELS = { square: t.formatSquare, portrait: t.formatPortrait, story: t.formatStory }
+  const FORMAT_RATIO_DISPLAY = { square: '1:1', portrait: '4:5', story: '9:16' }
+
+  function getMaxW(format) {
+    return format === 'story' ? 340 : format === 'portrait' ? 420 : 480
+  }
+
+  function postHasImage(postId) {
+    const postSlots = slotDataMap?.[postId]
+    if (!postSlots) return false
+    return Object.values(postSlots).some((s) => s?.rawDataURL)
+  }
+
   function renderCanvasArea() {
-    return (
-      <div className="w-full" style={{ maxWidth: templateMaxW }}>
-        {/* Format label */}
-        <div className="flex items-center gap-1.5 mb-1">
-          <span className="text-xs font-semibold text-gray-400 dark:text-gray-500">{fmtStyle.ratio}</span>
-          <span className="text-xs text-gray-400 dark:text-gray-500">
-            {format === 'square' ? t.formatSquare : format === 'portrait' ? t.formatPortrait : t.formatStory}
-          </span>
+    if (!posts || posts.length === 0) return null
+
+    // Single post — same layout as before
+    if (posts.length === 1) {
+      const post = posts[0]
+      const maxW = getMaxW(post.format)
+      return (
+        <div className="w-full" style={{ maxWidth: maxW }}>
+          <div className="flex items-center gap-1.5 mb-1">
+            <span className="text-xs font-semibold text-gray-400 dark:text-gray-500">{FORMAT_RATIO_DISPLAY[post.format] || '1:1'}</span>
+            <span className="text-xs text-gray-400 dark:text-gray-500">{FORMAT_LABELS[post.format] || ''}</span>
+          </div>
+          <div
+            className="relative rounded-xl flex flex-col gap-2 w-full overflow-hidden"
+            onDragOver={onTemplateDragOver}
+            onDragLeave={() => onSetDragOver(null)}
+            onDrop={onTemplateDrop}
+            onClick={onTemplateTap}
+          >
+            {renderTemplateForPost(post)}
+          </div>
         </div>
-        {/* Template container */}
-        <div
-          className="relative rounded-xl flex flex-col gap-2 w-full overflow-hidden"
-          onDragOver={onTemplateDragOver}
-          onDragLeave={() => onSetDragOver(null)}
-          onDrop={onTemplateDrop}
-          onClick={onTemplateTap}
-        >
-          {renderTemplate()}
+      )
+    }
+
+    // Multiple posts — grid layout
+    const gridCols = posts.length <= 2 ? 2 : posts.length <= 4 ? 2 : 3
+    return (
+      <div className="w-full max-w-[900px]">
+        <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${gridCols}, 1fr)` }}>
+          {posts.map((post, idx) => {
+            const isActive = post.id === activePostId
+            return (
+              <div
+                key={post.id}
+                onClick={() => onActivePostChange(post.id)}
+                className={`relative rounded-xl border-2 transition-all cursor-pointer overflow-hidden
+                  ${isActive
+                    ? 'border-blue-500 shadow-md'
+                    : 'border-stone-200 dark:border-[#2a2a2a] hover:border-stone-400 dark:hover:border-[#444] opacity-75 hover:opacity-100'}
+                `}
+              >
+                {/* Post badge */}
+                <div className={`absolute top-2 left-2 z-10 px-2 py-0.5 rounded-full text-[10px] font-bold
+                  ${isActive
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-stone-800/60 text-white'}
+                `}>
+                  {t.postBadge(idx + 1)}
+                </div>
+                {/* Format badge */}
+                <div className="absolute top-2 right-2 z-10 px-1.5 py-0.5 rounded bg-black/40 text-white text-[9px] font-medium">
+                  {FORMAT_RATIO_DISPLAY[post.format] || '1:1'}
+                </div>
+                {/* Template content */}
+                <div
+                  onDragOver={isActive ? onTemplateDragOver : undefined}
+                  onDragLeave={isActive ? () => onSetDragOver(null) : undefined}
+                  onDrop={isActive ? onTemplateDrop : undefined}
+                >
+                  {renderTemplateForPost(post)}
+                </div>
+                {/* Regenerate button — shows when post has an image and AI settings were used */}
+                {lastAiSettingsRef.current && postHasImage(post.id) && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleRegenerateForPost(post) }}
+                    disabled={aiImageLoading}
+                    className="w-full py-1.5 text-[10px] font-semibold transition-colors flex items-center justify-center gap-1
+                      bg-stone-100 dark:bg-[#222] text-gray-500 dark:text-gray-400
+                      hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:text-blue-600 dark:hover:text-blue-400
+                      disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {regeneratingPostId === post.id
+                      ? <><Loader2 className="w-3 h-3 animate-spin" /> {t.aiRegenerate || 'Regenerate'}</>
+                      : <><RefreshCw className="w-3 h-3" /> {t.aiRegenerate || 'Regenerate'}</>
+                    }
+                  </button>
+                )}
+              </div>
+            )
+          })}
         </div>
       </div>
     )
@@ -173,7 +372,7 @@ export default function EditorLayout({
       {/* ══════════════════════════════════════════════════════════════════ */}
       {/* DESKTOP LAYOUT                                                   */}
       {/* ══════════════════════════════════════════════════════════════════ */}
-      <div className="hidden md:flex flex-1 min-h-0">
+      <div className="hidden md:flex flex-1 min-h-0 overflow-hidden">
         {/* ── Icon sidebar ──────────────────────────────────────────────── */}
         <div className="w-16 flex-shrink-0 bg-white dark:bg-[#1a1a1a] border-e border-stone-200 dark:border-[#2a2a2a] flex flex-col items-center py-3 gap-0.5">
           <SidebarButton
@@ -274,28 +473,135 @@ export default function EditorLayout({
             onClick={() => selectTool(currentMode === 'text' ? 'move' : 'text')}
           />
 
-          {/* AI Line — with popover */}
-          <div className="relative" ref={aiRef}>
+          {/* AI Image — with popover */}
+          <div className="relative" ref={aiImageRef}>
             <SidebarButton
-              icon={<Zap className="w-5 h-5" />}
-              label={t.toolbarAI}
-              active={activePopover === 'ai'}
-              onClick={() => togglePopover('ai')}
+              icon={<Sparkles className="w-5 h-5" />}
+              label={t.toolbarAIImage || 'AI Image'}
+              active={activePopover === 'aiImage'}
+              onClick={() => { clearAIImageError(); togglePopover('aiImage') }}
             />
-            {activePopover === 'ai' && (
-              <div className={`absolute top-0 ltr:left-full rtl:right-full ltr:ml-2 rtl:mr-2 bg-white dark:bg-[#1a1a1a] border border-stone-200 dark:border-[#2a2a2a] rounded-lg shadow-lg py-1 min-w-[160px] z-30 ${popoverAnim}`}>
-                <button
-                  onClick={() => handleAutoArch('incisal')}
-                  className="w-full px-3 py-2 text-left text-xs text-gray-700 dark:text-gray-200 hover:bg-stone-100 dark:hover:bg-[#222] transition-colors"
-                >
-                  {t.toolbarIncisalArch || t.toolIncisalArch}
-                </button>
-                <button
-                  onClick={() => handleAutoArch('arch_upper')}
-                  className="w-full px-3 py-2 text-left text-xs text-gray-700 dark:text-gray-200 hover:bg-stone-100 dark:hover:bg-[#222] transition-colors"
-                >
-                  {t.toolbarFullArch || t.toolFullArch}
-                </button>
+            {activePopover === 'aiImage' && (
+              <div className={`absolute top-0 ltr:left-full rtl:right-full ltr:ml-2 rtl:mr-2 bg-white dark:bg-[#1a1a1a] border border-stone-200 dark:border-[#2a2a2a] rounded-lg shadow-lg p-3 min-w-[260px] z-30 ${popoverAnim}`}>
+                <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-2">{t.toolbarAIImage || 'AI Image'}</p>
+                {/* Model selector */}
+                <div className="relative mb-2" ref={aiModelRef}>
+                  <button
+                    onClick={() => setAiModelOpen((p) => !p)}
+                    className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border border-stone-200 dark:border-[#2a2a2a] bg-stone-50 dark:bg-[#111] hover:bg-stone-100 dark:hover:bg-[#1a1a1a] transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-[11px] font-bold ${activeAiModel.color}`}>{activeAiModel.label}</span>
+                      <span className="text-[9px] text-gray-400">{activeAiModel.sub}</span>
+                    </div>
+                    <ChevronDown className={`w-3 h-3 text-gray-400 transition-transform ${aiModelOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {aiModelOpen && (
+                    <div className={`absolute top-full mt-1 left-0 right-0 bg-white dark:bg-[#1a1a1a] border border-stone-200 dark:border-[#2a2a2a] rounded-lg shadow-lg py-1 z-50 ${popoverAnim}`}>
+                      {AI_MODEL_OPTIONS.map((m) => (
+                        <button
+                          key={m.value}
+                          onClick={() => { setAiModel(m.value); setAiModelOpen(false) }}
+                          className={`w-full px-3 py-1.5 flex items-center gap-2 text-left transition-colors hover:bg-stone-50 dark:hover:bg-[#222]
+                            ${aiModel === m.value ? 'bg-stone-50 dark:bg-[#222]' : ''}
+                          `}
+                        >
+                          <span className={`text-[11px] font-bold ${m.color}`}>{m.label}</span>
+                          <span className="text-[9px] text-gray-400">{m.sub}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <textarea
+                  value={aiPrompt}
+                  onChange={(e) => setAiPrompt(e.target.value)}
+                  placeholder={t.aiImagePromptPlaceholder || 'Describe the image you want...'}
+                  rows={3}
+                  className="w-full rounded-lg border border-stone-200 dark:border-[#2a2a2a] bg-stone-50 dark:bg-[#111] text-sm text-gray-700 dark:text-gray-200 px-2.5 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-blue-400 placeholder:text-gray-400"
+                />
+                {/* Reference image upload */}
+                <input ref={aiFileRef} type="file" accept="image/*" className="hidden" onChange={handleAIFileSelect} />
+                {aiRefImage ? (
+                  <div className="flex items-center gap-2 mt-1.5 mb-1.5 p-1.5 rounded-lg border border-stone-200 dark:border-[#2a2a2a] bg-stone-50 dark:bg-[#111]">
+                    <img src={aiRefImage.dataURL} alt="" className="w-10 h-10 rounded object-cover" />
+                    <span className="text-[10px] text-gray-500 truncate flex-1">{aiRefImage.name}</span>
+                    <button onClick={() => setAiRefImage(null)} className="p-0.5 rounded hover:bg-stone-200 dark:hover:bg-[#333] transition-colors">
+                      <X className="w-3.5 h-3.5 text-gray-400" />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => aiFileRef.current?.click()}
+                    className="w-full mt-1.5 mb-1.5 py-1.5 rounded-lg border border-dashed border-stone-300 dark:border-[#3a3a3a] text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:border-stone-400 dark:hover:border-[#555] transition-colors flex items-center justify-center gap-1.5"
+                  >
+                    <ImageUp className="w-3.5 h-3.5" /> {t.aiImageUpload || 'Upload reference image'}
+                  </button>
+                )}
+                {aiImageError && (
+                  <div className="mt-1 p-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+                    <p className="text-[10px] text-red-600 dark:text-red-400">{aiImageError}</p>
+                    {isOverloadError && (
+                      <button
+                        onClick={handleSwitchModel}
+                        className="mt-1 text-[10px] font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+                      >
+                        {t.aiImageTryOtherModel || 'Try another model'}
+                      </button>
+                    )}
+                  </div>
+                )}
+                <p className="text-[9px] text-gray-400 mt-1 mb-2">{t.aiImagePrivacyNote}</p>
+                {aiImageLoading ? (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex gap-1.5">
+                      <button
+                        disabled
+                        className="flex-1 py-2 rounded-lg text-xs font-semibold bg-blue-600/60 text-white flex items-center justify-center gap-1.5 cursor-wait"
+                      >
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        {batchProgress
+                          ? `${batchProgress.done}/${batchProgress.total} ${t.aiImageGenerating || 'Generating...'}`
+                          : <>{t.aiImageGenerating || 'Generating...'} {aiElapsed > 0 && <span className="text-blue-200 tabular-nums">{aiElapsed}s</span>}</>
+                        }
+                      </button>
+                      <button
+                        onClick={cancelAIImage}
+                        className="px-2.5 py-2 rounded-lg text-xs font-semibold bg-red-600 hover:bg-red-700 text-white transition-colors"
+                        title="Cancel"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    {batchProgress && (
+                      <div className="w-full bg-stone-200 dark:bg-[#2a2a2a] rounded-full h-1.5">
+                        <div
+                          className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
+                          style={{ width: `${(batchProgress.done / batchProgress.total) * 100}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
+                    <button
+                      onClick={handleAIImageGenerate}
+                      disabled={!aiPrompt.trim()}
+                      className="w-full py-2 rounded-lg text-xs font-semibold transition-colors bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                    >
+                      {t.aiImageGenerate || 'Generate'}
+                    </button>
+                    {posts && posts.length > 1 && (
+                      <button
+                        onClick={handleAIBatchGenerate}
+                        disabled={!aiPrompt.trim()}
+                        className="w-full py-2 rounded-lg text-xs font-semibold transition-colors bg-purple-600 hover:bg-purple-700 text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                      >
+                        <Sparkles className="w-3 h-3" /> {(t.aiGenerateAll || 'Generate for All Posts') + ` (${posts.length})`}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -389,13 +695,13 @@ export default function EditorLayout({
 
         {/* ── Photo panel (toggleable, animated) ────────────────────────── */}
         <div
-          className="flex-shrink-0 bg-white dark:bg-[#1a1a1a] border-e border-stone-200 dark:border-[#2a2a2a] overflow-hidden transition-[width] duration-200 ease-in-out"
+          className="flex-shrink-0 self-stretch min-h-0 bg-white dark:bg-[#1a1a1a] border-e border-stone-200 dark:border-[#2a2a2a] overflow-hidden transition-[width] duration-200 ease-in-out"
           style={{ width: photoPanelOpen ? 256 : 0 }}
         >
-          <div className="w-64">
+          <div className="w-64 h-full overflow-hidden">
             <PhotoPanel
               images={images}
-              slotData={slotData}
+              slotData={flatSlotData}
               selectedImageId={selectedImageId}
               bulkDragging={bulkDragging}
               inputRef={inputRef}
@@ -484,23 +790,116 @@ export default function EditorLayout({
                 </div>
               )}
 
-              {/* AI arch */}
-              {mobileTab === 'ai' && (
+              {/* AI Image */}
+              {mobileTab === 'aiImage' && (
                 <div className="bg-white/95 dark:bg-[#1a1a1a]/95 backdrop-blur-sm border-t border-stone-200 dark:border-[#2a2a2a] px-4 py-3 rounded-t-2xl">
-                  <div className="flex gap-2">
+                  {/* Model selector */}
+                  <div className="relative mb-2" ref={aiModelRef}>
                     <button
-                      onClick={() => { activeRef?.current?.addArchStroke('incisal'); setMobileTab(null) }}
-                      className="flex-1 py-2.5 rounded-xl border border-stone-200 dark:border-[#2a2a2a] text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-stone-50 dark:hover:bg-[#222] transition-colors"
+                      onClick={() => setAiModelOpen((p) => !p)}
+                      className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border border-stone-200 dark:border-[#2a2a2a] bg-stone-50 dark:bg-[#111] hover:bg-stone-100 dark:hover:bg-[#1a1a1a] transition-colors"
                     >
-                      {t.toolbarIncisalArch || t.toolIncisalArch}
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-[11px] font-bold ${activeAiModel.color}`}>{activeAiModel.label}</span>
+                        <span className="text-[9px] text-gray-400">{activeAiModel.sub}</span>
+                      </div>
+                      <ChevronDown className={`w-3 h-3 text-gray-400 transition-transform ${aiModelOpen ? 'rotate-180' : ''}`} />
                     </button>
-                    <button
-                      onClick={() => { activeRef?.current?.addArchStroke('arch_upper'); setMobileTab(null) }}
-                      className="flex-1 py-2.5 rounded-xl border border-stone-200 dark:border-[#2a2a2a] text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-stone-50 dark:hover:bg-[#222] transition-colors"
-                    >
-                      {t.toolbarFullArch || t.toolFullArch}
-                    </button>
+                    {aiModelOpen && (
+                      <div className={`absolute bottom-full mb-1 left-0 right-0 bg-white dark:bg-[#1a1a1a] border border-stone-200 dark:border-[#2a2a2a] rounded-lg shadow-lg py-1 z-50 ${popoverAnim}`}>
+                        {AI_MODEL_OPTIONS.map((m) => (
+                          <button
+                            key={m.value}
+                            onClick={() => { setAiModel(m.value); setAiModelOpen(false) }}
+                            className={`w-full px-3 py-1.5 flex items-center gap-2 text-left transition-colors hover:bg-stone-50 dark:hover:bg-[#222]
+                              ${aiModel === m.value ? 'bg-stone-50 dark:bg-[#222]' : ''}
+                            `}
+                          >
+                            <span className={`text-[11px] font-bold ${m.color}`}>{m.label}</span>
+                            <span className="text-[9px] text-gray-400">{m.sub}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
+                  <textarea
+                    value={aiPrompt}
+                    onChange={(e) => setAiPrompt(e.target.value)}
+                    placeholder={t.aiImagePromptPlaceholder || 'Describe the image you want...'}
+                    rows={2}
+                    className="w-full rounded-lg border border-stone-200 dark:border-[#2a2a2a] bg-stone-50 dark:bg-[#111] text-sm text-gray-700 dark:text-gray-200 px-2.5 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-blue-400 placeholder:text-gray-400"
+                  />
+                  {/* Reference image upload */}
+                  {aiRefImage ? (
+                    <div className="flex items-center gap-2 mt-1.5 mb-1.5 p-1.5 rounded-lg border border-stone-200 dark:border-[#2a2a2a] bg-stone-50 dark:bg-[#111]">
+                      <img src={aiRefImage.dataURL} alt="" className="w-10 h-10 rounded object-cover" />
+                      <span className="text-[10px] text-gray-500 truncate flex-1">{aiRefImage.name}</span>
+                      <button onClick={() => setAiRefImage(null)} className="p-0.5 rounded hover:bg-stone-200 dark:hover:bg-[#333] transition-colors">
+                        <X className="w-3.5 h-3.5 text-gray-400" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => aiFileRef.current?.click()}
+                      className="w-full mt-1.5 mb-1.5 py-1.5 rounded-lg border border-dashed border-stone-300 dark:border-[#3a3a3a] text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:border-stone-400 dark:hover:border-[#555] transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <ImageUp className="w-3.5 h-3.5" /> {t.aiImageUpload || 'Upload reference image'}
+                    </button>
+                  )}
+                  {aiImageError && (
+                    <p className="text-[10px] text-red-500 mt-1">{aiImageError}</p>
+                  )}
+                  <p className="text-[9px] text-gray-400 mt-1 mb-2">{t.aiImagePrivacyNote}</p>
+                  {aiImageLoading ? (
+                    <div className="flex flex-col gap-1.5">
+                      <div className="flex gap-1.5">
+                        <button
+                          disabled
+                          className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-blue-600/60 text-white flex items-center justify-center gap-1.5 cursor-wait"
+                        >
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          {batchProgress
+                            ? `${batchProgress.done}/${batchProgress.total} ${t.aiImageGenerating || 'Generating...'}`
+                            : <>{t.aiImageGenerating || 'Generating...'} {aiElapsed > 0 && <span className="text-blue-200 tabular-nums">{aiElapsed}s</span>}</>
+                          }
+                        </button>
+                        <button
+                          onClick={cancelAIImage}
+                          className="px-3 py-2.5 rounded-xl text-sm font-semibold bg-red-600 hover:bg-red-700 text-white transition-colors"
+                          title="Cancel"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                      {batchProgress && (
+                        <div className="w-full bg-stone-200 dark:bg-[#2a2a2a] rounded-full h-1.5">
+                          <div
+                            className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
+                            style={{ width: `${(batchProgress.done / batchProgress.total) * 100}%` }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      <button
+                        onClick={handleAIImageGenerate}
+                        disabled={!aiPrompt.trim()}
+                        className="w-full py-2.5 rounded-xl text-sm font-semibold transition-colors bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                      >
+                        {t.aiImageGenerate || 'Generate'}
+                      </button>
+                      {posts && posts.length > 1 && (
+                        <button
+                          onClick={handleAIBatchGenerate}
+                          disabled={!aiPrompt.trim()}
+                          className="w-full py-2.5 rounded-xl text-sm font-semibold transition-colors bg-purple-600 hover:bg-purple-700 text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" /> {(t.aiGenerateAll || 'Generate for All Posts') + ` (${posts.length})`}
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -565,7 +964,7 @@ export default function EditorLayout({
                 {images.length > 0 && (
                   <div className="grid grid-cols-4 gap-2">
                     {images.map((img) => {
-                      const inSlot = Object.values(slotData).some((s) => s?.rawId === img.id)
+                      const inSlot = Object.values(flatSlotData).some((s) => s?.rawId === img.id)
                       const isSel = selectedImageId === img.id
                       return (
                         <div
@@ -648,10 +1047,10 @@ export default function EditorLayout({
               onClick={() => { selectTool(currentMode === 'text' ? 'move' : 'text'); setMobileTab(null) }}
             />
             <MobileNavBtn
-              icon={<Zap className="w-6 h-6" />}
-              label={t.toolbarAI}
-              active={mobileTab === 'ai'}
-              onClick={() => handleMobileTab('ai')}
+              icon={<Sparkles className="w-6 h-6" />}
+              label={t.toolbarAIImage || 'AI Image'}
+              active={mobileTab === 'aiImage'}
+              onClick={() => { clearAIImageError(); handleMobileTab('aiImage') }}
             />
             <MobileNavBtn
               icon={<Undo2 className="w-6 h-6" />}

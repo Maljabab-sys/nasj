@@ -11,7 +11,7 @@ export default function PhotoPanel({
   const { t } = useLanguage()
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full max-h-[calc(100dvh-5rem)]">
       {/* Panel header */}
       <div className="px-3 py-2.5 border-b border-stone-200 dark:border-[#2a2a2a]">
         <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-widest">

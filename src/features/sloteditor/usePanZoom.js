@@ -36,7 +36,7 @@ function computeFit(imgW, imgH, containerW, containerH) {
   }
 }
 
-export function usePanZoom({ containerRef, imgNaturalW, imgNaturalH, scale, offsetX, offsetY, onUpdate, enabled }) {
+export function usePanZoom({ containerRef, imgNaturalW, imgNaturalH, scale, offsetX, offsetY, onUpdate, enabled, wheelEnabled }) {
   const panningRef = useRef(false)
   const startRef = useRef({ x: 0, y: 0, ox: 0, oy: 0 })
   const pinchRef = useRef({ dist: 0, scale: 1, ox: 0, oy: 0 })
@@ -76,10 +76,10 @@ export function usePanZoom({ containerRef, imgNaturalW, imgNaturalH, scale, offs
 
   const onMouseUp = useCallback(() => { panningRef.current = false }, [])
 
-  // ── Wheel zoom (always active, regardless of mode) ─────────────
+  // ── Wheel zoom (only when zoom tool is active) ─────────────
   useEffect(() => {
     const el = containerRef.current
-    if (!el) return
+    if (!el || !wheelEnabled) return
     function handleWheel(e) {
       e.preventDefault()
       const rect = el.getBoundingClientRect()
@@ -93,7 +93,7 @@ export function usePanZoom({ containerRef, imgNaturalW, imgNaturalH, scale, offs
     }
     el.addEventListener('wheel', handleWheel, { passive: false })
     return () => el.removeEventListener('wheel', handleWheel)
-  }, [containerRef, scale, offsetX, offsetY, onUpdate, clamp])
+  }, [containerRef, scale, offsetX, offsetY, onUpdate, clamp, wheelEnabled])
 
   // ── Touch pan + pinch zoom ─────────────────────────────────────
   const onTouchStart = useCallback((e) => {

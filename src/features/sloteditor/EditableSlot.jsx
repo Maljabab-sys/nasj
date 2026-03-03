@@ -97,6 +97,9 @@ const EditableSlot = forwardRef(function EditableSlot({
   const prevSize = useRef({ w: 0, h: 0 })
   const [imgNatural, setImgNatural] = useState({ w: 0, h: 0 })
 
+  // Live refs for values needed inside stale-closure callbacks (e.g. handleMoveMouseDown)
+  const liveRef = useRef({ image: null, imgNatural: { w: 0, h: 0 }, scale: 1, offsetX: 0, offsetY: 0 })
+
   // ── Direct canvas text editing state ──────────────────────────────────
   // editingText = null | { isNew, strokeIdx, originalStroke, text, nx, ny, fontSize, fontFamily, color, bgColor }
   const [editingText, setEditingText] = useState(null)
@@ -115,6 +118,7 @@ const EditableSlot = forwardRef(function EditableSlot({
   const [hoveredTextIdx, setHoveredTextIdx] = useState(-1)
   const [selectedTextIdx, setSelectedTextIdx] = useState(-1)
   const [showSlotClear, setShowSlotClear] = useState(false)
+  const [hoveredOnImage, setHoveredOnImage] = useState(false)
 
   // Pinch-to-scale ref
   const textPinchRef = useRef({ active: false, startDist: 0, startSize: 0 })
@@ -146,6 +150,8 @@ const EditableSlot = forwardRef(function EditableSlot({
   const offsetY = slotState?.offsetY || 0
   const bgColor = slotState?.bgColor || 'white'
 
+  liveRef.current = { image, imgNatural, scale, offsetX, offsetY }
+
   const isDrawMode = mode === 'draw' || mode === 'points'
   const isZoomMode = mode === 'zoomIn' || mode === 'zoomOut'
   const isTextMode = mode === 'text'
@@ -163,6 +169,7 @@ const EditableSlot = forwardRef(function EditableSlot({
     scale, offsetX, offsetY,
     onUpdate: handlePanUpdate,
     enabled: !!image && isPanMode && !isDraggingText,
+    wheelEnabled: !!image && isZoomMode,
   })
 
   // ── Click-to-zoom handler ───────────────────────────────────────────
@@ -178,9 +185,12 @@ const EditableSlot = forwardRef(function EditableSlot({
   // Expose annotation methods to parent for external toolbar
   useImperativeHandle(ref, () => ({
     addArchStroke: annotation.addArchStroke,
+    addTextStroke: annotation.addTextStroke,
+    removeTemplateStrokes: annotation.removeTemplateStrokes,
+    replaceTemplateStrokes: annotation.replaceTemplateStrokes,
     undoLast: annotation.undoLast,
     deleteStroke: annotation.deleteStroke,
-  }), [annotation.addArchStroke, annotation.undoLast, annotation.deleteStroke])
+  }), [annotation.addArchStroke, annotation.addTextStroke, annotation.removeTemplateStrokes, annotation.replaceTemplateStrokes, annotation.undoLast, annotation.deleteStroke])
 
   // Sync draw settings to annotation hook
   useEffect(() => {
@@ -195,8 +205,10 @@ const EditableSlot = forwardRef(function EditableSlot({
   }, [image?.id]) // eslint-disable-line
 
   // Propagate stroke changes to parent
+  const prevStrokesRef = useRef(annotation.strokes)
   useEffect(() => {
-    if (annotation.strokes !== slotState?.strokes) {
+    if (annotation.strokes !== prevStrokesRef.current) {
+      prevStrokesRef.current = annotation.strokes
       onSlotStateChange?.({ strokes: annotation.strokes })
     }
   }, [annotation.strokes]) // eslint-disable-line
@@ -225,6 +237,19 @@ const EditableSlot = forwardRef(function EditableSlot({
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
   }, [selectedLineIdx, selectedTextIdx, showSlotClear])
+
+  // Deselect when clicking outside the canvas container
+  useEffect(() => {
+    function handleOutsideClick(e) {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setSelectedLineIdx(-1)
+        setSelectedTextIdx(-1)
+        setShowSlotClear(false)
+      }
+    }
+    document.addEventListener('pointerdown', handleOutsideClick, true)
+    return () => document.removeEventListener('pointerdown', handleOutsideClick, true)
+  }, [])
 
   // Guard stale selection indices after stroke deletion / undo
   useEffect(() => {
@@ -644,10 +669,26 @@ const EditableSlot = forwardRef(function EditableSlot({
       setShowSlotClear(false)
       return
     }
-    // Clicked empty area — clear stroke selections, show image clear button
+    // Clicked empty area — show image controls only if click landed on the visual image
+    // Use liveRef to avoid stale-closure issues (this callback depends only on annotation.strokes)
+    const live = liveRef.current
+    let isOnImage = false
+    if (live.image && live.imgNatural.w && live.imgNatural.h) {
+      const cW = d.w, cH = d.h
+      const imgRatio = live.imgNatural.w / live.imgNatural.h
+      const cRatio = cW / cH
+      const fitW = imgRatio > cRatio ? cW : cH * imgRatio
+      const fitH = imgRatio > cRatio ? cW / imgRatio : cH
+      const imgLeft = cW / 2 + live.offsetX - (fitW * live.scale) / 2
+      const imgTop = cH / 2 + live.offsetY - (fitH * live.scale) / 2
+      const clickPxX = norm.x * cW
+      const clickPxY = norm.y * cH
+      isOnImage = clickPxX >= imgLeft && clickPxX <= imgLeft + fitW * live.scale &&
+                  clickPxY >= imgTop && clickPxY <= imgTop + fitH * live.scale
+    }
     setSelectedLineIdx(-1)
     setSelectedTextIdx(-1)
-    setShowSlotClear(true)
+    setShowSlotClear(isOnImage)
   }, [annotation.strokes]) // eslint-disable-line
 
   const handleMoveMouseMove = useCallback((e) => {
@@ -878,6 +919,7 @@ const EditableSlot = forwardRef(function EditableSlot({
     aspectRatio: aspectRatio === 'auto' ? undefined : (aspectRatio || '1/1'),
     minHeight: aspectRatio === 'auto' ? 0 : 80,
     flex: aspectRatio === 'auto' ? '1 1 0%' : undefined,
+    overflow: aspectRatio === 'auto' ? 'hidden' : undefined,
   }
 
   const dragDropHandlers = {
@@ -893,7 +935,7 @@ const EditableSlot = forwardRef(function EditableSlot({
     if (mode === 'zoomIn') return 'zoom-in'
     if (mode === 'zoomOut') return 'zoom-out'
     if (isTextMode) return hoveredTextIdx >= 0 ? 'pointer' : 'text'
-    if (isPanMode) return (hoveredTextIdx >= 0 || hoveredLineIdx >= 0) ? 'pointer' : 'grab'
+    if (isPanMode) return (hoveredTextIdx >= 0 || hoveredLineIdx >= 0 || hoveredOnImage) ? 'pointer' : 'default'
     return 'default'
   }
 
@@ -930,9 +972,27 @@ const EditableSlot = forwardRef(function EditableSlot({
       onMouseDown: (e) => {
         handleMoveMouseDown(e)
         if (!draggingRef.current.active) {
-          panHandlers.onMouseDown(e)
-          // Track pan start position to detect drag vs click
-          containerRef.current._panStart = { x: e.clientX, y: e.clientY }
+          // Only allow panning if click landed on the actual visible image
+          const norm = getNormFromEvent(e)
+          const d = cDims()
+          const live = liveRef.current
+          let isOnImage = false
+          if (norm && live.image && live.imgNatural.w && live.imgNatural.h) {
+            const cW = d.w, cH = d.h
+            const imgRatio = live.imgNatural.w / live.imgNatural.h
+            const cRatio = cW / cH
+            const fitW = imgRatio > cRatio ? cW : cH * imgRatio
+            const fitH = imgRatio > cRatio ? cW / imgRatio : cH
+            const imgLeft = cW / 2 + live.offsetX - (fitW * live.scale) / 2
+            const imgTop = cH / 2 + live.offsetY - (fitH * live.scale) / 2
+            isOnImage = norm.x * cW >= imgLeft && norm.x * cW <= imgLeft + fitW * live.scale &&
+                        norm.y * cH >= imgTop && norm.y * cH <= imgTop + fitH * live.scale
+          }
+          if (isOnImage) {
+            panHandlers.onMouseDown(e)
+            // Track pan start position to detect drag vs click
+            containerRef.current._panStart = { x: e.clientX, y: e.clientY }
+          }
         }
       },
       onMouseMove: (e) => {
@@ -950,6 +1010,21 @@ const EditableSlot = forwardRef(function EditableSlot({
             const d = cDims()
             setHoveredTextIdx(findTextStrokeAt(annotation.strokes, norm.x, norm.y, d.w, d.h))
             setHoveredLineIdx(findLineStrokeAt(annotation.strokes, norm.x, norm.y))
+            // Track whether mouse is over the actual visible image
+            const live = liveRef.current
+            let onImg = false
+            if (live.image && live.imgNatural.w && live.imgNatural.h) {
+              const cW = d.w, cH = d.h
+              const imgRatio = live.imgNatural.w / live.imgNatural.h
+              const cRatio = cW / cH
+              const fitW = imgRatio > cRatio ? cW : cH * imgRatio
+              const fitH = imgRatio > cRatio ? cW / imgRatio : cH
+              const imgLeft = cW / 2 + live.offsetX - (fitW * live.scale) / 2
+              const imgTop = cH / 2 + live.offsetY - (fitH * live.scale) / 2
+              onImg = norm.x * cW >= imgLeft && norm.x * cW <= imgLeft + fitW * live.scale &&
+                      norm.y * cH >= imgTop && norm.y * cH <= imgTop + fitH * live.scale
+            }
+            setHoveredOnImage(onImg)
           }
           panHandlers.onMouseMove(e)
         }
@@ -964,6 +1039,7 @@ const EditableSlot = forwardRef(function EditableSlot({
         containerRef.current._panStart = null
         setHoveredTextIdx(-1)
         setHoveredLineIdx(-1)
+        setHoveredOnImage(false)
         panHandlers.onMouseLeave(e)
       },
     }
@@ -1104,6 +1180,23 @@ const EditableSlot = forwardRef(function EditableSlot({
           />
         )}
 
+        {/* Hover highlight for image */}
+        {isPanMode && hoveredOnImage && hoveredTextIdx < 0 && hoveredLineIdx < 0 && !showSlotClear && (() => {
+          const ir = getImageRect()
+          if (!ir) return null
+          const el = containerRef.current
+          const cRect = el ? el.getBoundingClientRect() : { width: 0, height: 0 }
+          const cW = cRect.width, cH = cRect.height
+          const boxL = Math.max(0, ir.left), boxT = Math.max(0, ir.top)
+          const boxR = Math.min(cW, ir.right), boxB = Math.min(cH, ir.bottom)
+          return (
+            <div
+              className="absolute pointer-events-none border-2 border-blue-400/70 rounded z-[2]"
+              style={{ left: boxL, top: boxT, width: boxR - boxL, height: boxB - boxT }}
+            />
+          )
+        })()}
+
         {/* Selected line stroke — persistent highlight + delete button */}
         {isPanMode && !editingText && selectedLineIdx >= 0 && annotation.strokes[selectedLineIdx] && (() => {
           const d = cDims()
@@ -1155,21 +1248,7 @@ const EditableSlot = forwardRef(function EditableSlot({
           )
         })()}
 
-        {/* Template overlay preview — label only (watermark rendered at parent level) */}
-        {selectedTemplate && selectedTemplate !== 'clean' && slotKey !== 'single' && (
-          <div className="absolute inset-0 pointer-events-none z-[1]">
-            {selectedTemplate === 'classic' && (
-              <div className="absolute top-2.5 left-2.5 px-2.5 py-0.5 rounded-md bg-black/60 backdrop-blur-sm text-white text-[10px] font-semibold tracking-wide">
-                {label}
-              </div>
-            )}
-            {selectedTemplate === 'elegant' && (
-              <div className="absolute bottom-2 left-1/2 -translate-x-1/2 text-white/50 text-[9px] font-bold uppercase tracking-[0.15em]">
-                {label}
-              </div>
-            )}
-          </div>
-        )}
+        {/* Template labels are now editable text strokes — no static CSS overlay needed */}
 
         {/* Image controls — shown on click: selection box with scale handles + × */}
         {image && showSlotClear && (() => {
@@ -1192,15 +1271,24 @@ const EditableSlot = forwardRef(function EditableSlot({
             e.stopPropagation()
             const clientY = e.touches ? e.touches[0].clientY : e.clientY
             const startScale = scale
+            // Compute scale factor so image edge tracks the mouse 1:1
+            // Image grows from center, so bottom edge moves by fitH * deltaScale / 2
+            // For it to match deltaY: scaleFactor = 2 * startScale / visibleH
+            const visibleH = ir.bottom - ir.top
+            const scaleFactor = visibleH > 0 ? (2 * startScale) / visibleH : 0.005
+            // Lock cursor globally with !important to override inline styles
+            const cursorLock = document.createElement('style')
+            cursorLock.textContent = '* { cursor: ns-resize !important; }'
+            document.head.appendChild(cursorLock)
             function handleMove(ev) {
               ev.preventDefault()
               const cy = ev.touches ? ev.touches[0].clientY : ev.clientY
               const deltaY = cy - clientY
-              // Drag down = scale up, drag up = scale down. Min 0.3, max 5.
-              const newScale = Math.max(0.3, Math.min(5, startScale + deltaY * 0.015))
+              const newScale = Math.max(0.3, Math.min(5, startScale + deltaY * scaleFactor))
               onSlotStateChange?.({ scale: newScale })
             }
             function handleEnd() {
+              cursorLock.remove()
               document.removeEventListener('mousemove', handleMove)
               document.removeEventListener('mouseup', handleEnd)
               document.removeEventListener('touchmove', handleMove)
@@ -1228,7 +1316,7 @@ const EditableSlot = forwardRef(function EditableSlot({
                     style={{
                       ...(cx ? { right: 0 } : { left: 0 }),
                       ...(cy ? { bottom: 0, top: 'auto' } : { top: 0 }),
-                      transform: 'translate(-50%, -50%)',
+                      transform: `translate(${cx ? '50%' : '-50%'}, ${cy ? '50%' : '-50%'})`,
                       cursor: `${dir}-resize`,
                     }}
                     onMouseDown={handleScaleStart}
