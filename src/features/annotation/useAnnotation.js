@@ -6,7 +6,7 @@ import { ANNOTATION_COLOR, DASH_PATTERN, LINE_WIDTH } from '../../constants/anno
 /**
  * Returns canvas-relative normalized (0–1) coords from a pointer event.
  */
-function getNormalizedPoint(e, canvas) {
+export function getNormalizedPoint(e, canvas) {
   const rect = canvas.getBoundingClientRect()
   const scaleX = canvas.width / rect.width / (window.devicePixelRatio || 1)
   const scaleY = canvas.height / rect.height / (window.devicePixelRatio || 1)
@@ -23,10 +23,15 @@ export function useAnnotation(imageDataURL) {
   const [activeTool, setActiveTool] = useState('free')
   const [strokes, setStrokes] = useState([])
 
+  // Draw settings ref — updated externally via setDrawSettings
+  const drawSettingsRef = useRef({ color: ANNOTATION_COLOR, lineWidth: LINE_WIDTH, dashed: true })
+
   // In-progress state (refs to avoid stale closures in event handlers)
   const isDrawingRef = useRef(false)
   const currentFreePathRef = useRef([])
   const currentPointsRef = useRef([])
+  const previewStrokeRef = useRef(null)
+  const hiddenStrokeIdxRef = useRef(-1)
 
   // Redraw everything on the canvas
   const redraw = useCallback(
@@ -40,19 +45,23 @@ export function useAnnotation(imageDataURL) {
 
       ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-      // Draw committed strokes
-      strokes.forEach((stroke) => drawStroke(ctx, stroke, W, H))
+      // Draw committed strokes (skip hidden stroke during editing)
+      strokes.forEach((stroke, i) => {
+        if (i === hiddenStrokeIdxRef.current) return
+        drawStroke(ctx, stroke, W, H)
+      })
 
       // Draw in-progress free path
       if (isDrawingRef.current && currentFreePathRef.current.length > 1) {
+        const ds = drawSettingsRef.current
         drawStroke(
           ctx,
           {
             type: 'free',
             points: currentFreePathRef.current,
-            color: ANNOTATION_COLOR,
-            lineWidth: LINE_WIDTH,
-            dashPattern: DASH_PATTERN,
+            color: ds.color,
+            lineWidth: ds.lineWidth,
+            dashPattern: ds.dashed ? DASH_PATTERN : [],
           },
           W,
           H,
@@ -62,18 +71,24 @@ export function useAnnotation(imageDataURL) {
       // Draw in-progress point-to-point path
       const pts = pendingPoints ?? currentPointsRef.current
       if (pts.length > 1) {
+        const ds = drawSettingsRef.current
         drawStroke(
           ctx,
           {
             type: 'points',
             points: pts,
-            color: ANNOTATION_COLOR,
-            lineWidth: LINE_WIDTH,
-            dashPattern: DASH_PATTERN,
+            color: ds.color,
+            lineWidth: ds.lineWidth,
+            dashPattern: ds.dashed ? DASH_PATTERN : [],
           },
           W,
           H,
         )
+      }
+
+      // Draw live preview text stroke
+      if (previewStrokeRef.current) {
+        drawStroke(ctx, previewStrokeRef.current, W, H)
       }
     },
     [strokes],
@@ -133,12 +148,13 @@ export function useAnnotation(imageDataURL) {
       e.preventDefault()
       isDrawingRef.current = false
       if (currentFreePathRef.current.length > 1) {
+        const ds = drawSettingsRef.current
         const newStroke = {
           type: 'free',
           points: [...currentFreePathRef.current],
-          color: ANNOTATION_COLOR,
-          lineWidth: LINE_WIDTH,
-          dashPattern: DASH_PATTERN,
+          color: ds.color,
+          lineWidth: ds.lineWidth,
+          dashPattern: ds.dashed ? DASH_PATTERN : [],
         }
         setStrokes((prev) => [...prev, newStroke])
       }
@@ -166,12 +182,13 @@ export function useAnnotation(imageDataURL) {
       // Remove the last two duplicate points added by the two preceding click events
       const pts = currentPointsRef.current.slice(0, -2)
       if (pts.length > 1) {
+        const ds = drawSettingsRef.current
         const newStroke = {
           type: 'points',
           points: pts,
-          color: ANNOTATION_COLOR,
-          lineWidth: LINE_WIDTH,
-          dashPattern: DASH_PATTERN,
+          color: ds.color,
+          lineWidth: ds.lineWidth,
+          dashPattern: ds.dashed ? DASH_PATTERN : [],
         }
         setStrokes((prev) => [...prev, newStroke])
       }
@@ -209,6 +226,14 @@ export function useAnnotation(imageDataURL) {
     return () => window.removeEventListener('keydown', onKey)
   }, [redraw])
 
+  const setDrawSettings = useCallback((settings) => {
+    drawSettingsRef.current = { ...drawSettingsRef.current, ...settings }
+  }, [])
+
+  const deleteStroke = useCallback((index) => {
+    setStrokes((prev) => prev.filter((_, i) => i !== index))
+  }, [])
+
   const undoLast = useCallback(() => {
     setStrokes((prev) => prev.slice(0, -1))
   }, [])
@@ -224,10 +249,36 @@ export function useAnnotation(imageDataURL) {
     setStrokes((prev) => [...prev, stroke])
   }, [])
 
+  const addTextStroke = useCallback(({ text, x, y, fontSize, fontFamily, color, bgColor, textAlign, direction, bgShape }) => {
+    setStrokes((prev) => [...prev, { type: 'text', text, x, y, fontSize, fontFamily, color, bgColor, textAlign, direction, bgShape }])
+  }, [])
+
+  const setPreviewStroke = useCallback((stroke) => {
+    previewStrokeRef.current = stroke
+    redraw()
+  }, [redraw])
+
+  // Update a stroke at a given index (used for moving text)
+  const updateStroke = useCallback((index, patch) => {
+    setStrokes((prev) => prev.map((s, i) => i === index ? { ...s, ...patch } : s))
+  }, [])
+
+  // Temporarily hide a stroke visually (for editing existing text as preview)
+  const hideStroke = useCallback((index) => {
+    hiddenStrokeIdxRef.current = index
+    redraw()
+  }, [redraw])
+
+  const unhideStroke = useCallback(() => {
+    hiddenStrokeIdxRef.current = -1
+    redraw()
+  }, [redraw])
+
   // Get canvas cursor style
   const getCursor = () => {
     if (activeTool === 'free') return 'crosshair'
     if (activeTool === 'points') return 'cell'
+    if (activeTool === 'text') return 'text'
     return 'default'
   }
 
@@ -237,6 +288,9 @@ export function useAnnotation(imageDataURL) {
     setActiveTool,
     strokes,
     setStrokes,
+    drawSettingsRef,
+    setDrawSettings,
+    deleteStroke,
     handlers: {
       onMouseDown: handleMouseDown,
       onMouseMove: handleMouseMove,
@@ -252,5 +306,10 @@ export function useAnnotation(imageDataURL) {
     undoLast,
     clearAll,
     addArchStroke,
+    addTextStroke,
+    updateStroke,
+    setPreviewStroke,
+    hideStroke,
+    unhideStroke,
   }
 }

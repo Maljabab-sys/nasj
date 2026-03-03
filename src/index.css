@@ -42,16 +42,20 @@ html.font-arabic textarea {
 }
 
 /* Stagger entrance animation */
-@keyframes fadeUp {
-  from { opacity: 0; transform: translateY(18px); }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-10px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 
 .stagger-item {
   opacity: 0;
-  animation: fadeUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation: fadeIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) forwards;
   animation-delay: var(--stagger-delay, 0ms);
 }
+
+/* Hide scrollbar but keep scrollable */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
 /* RTL layout helpers */
 html[dir='rtl'] .ltr-only {

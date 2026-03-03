@@ -13,6 +13,21 @@ npm run preview   # Preview production build
 
 Working directory: `ortho-post-creator/`
 
+## GitHub
+
+- **Repo**: https://github.com/Maljabab-sys/nasj
+- **Default branch**: `main`
+
+### /push — Push to main
+
+When the user says `/push`, follow these steps:
+
+1. Run `npm run build` to verify the project builds successfully
+2. Stage all changes: `git add -A`
+3. Create a commit with a concise message describing the changes (include `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`)
+4. Push to origin main: `git push origin main`
+5. Report the result to the user
+
 ## Stack
 
 - React 19 + Vite 7

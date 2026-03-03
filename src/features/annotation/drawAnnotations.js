@@ -1,4 +1,4 @@
-import { ANNOTATION_COLOR, DASH_PATTERN, LINE_WIDTH } from '../../constants/annotation'
+import { ANNOTATION_COLOR, DASH_PATTERN, LINE_WIDTH, TEXT_DEFAULT_FONT, TEXT_DEFAULT_SIZE, TEXT_DEFAULT_COLOR, TEXT_BG_ROUND_RADIUS } from '../../constants/annotation'
 
 /**
  * Draws a Catmull-Rom smooth curve through the given pixel points.
@@ -24,6 +24,55 @@ function drawCatmullRom(ctx, pts) {
  * Coordinates in stroke.points are normalized (0–1); they are scaled by W/H.
  */
 export function drawStroke(ctx, stroke, W, H) {
+  // Text strokes
+  if (stroke.type === 'text') {
+    const x = stroke.x * W
+    const y = stroke.y * H
+    const fontSize = (stroke.fontSize || TEXT_DEFAULT_SIZE) * (W / 1080)
+    const fontFamily = stroke.fontFamily || TEXT_DEFAULT_FONT
+    const color = stroke.color || TEXT_DEFAULT_COLOR
+    const bgColor = stroke.bgColor || 'transparent'
+    const align = stroke.textAlign || 'left'
+    const dir = stroke.direction || 'ltr'
+    const bgShape = stroke.bgShape || 'rounded'
+    ctx.save()
+    ctx.font = `bold ${fontSize}px "${fontFamily}", sans-serif`
+    ctx.textBaseline = 'middle'
+    ctx.textAlign = align
+    ctx.direction = dir
+    // Draw background rect if not transparent
+    if (bgColor && bgColor !== 'transparent') {
+      const metrics = ctx.measureText(stroke.text)
+      const padX = fontSize * 0.25
+      const padY = fontSize * 0.15
+      // Compute bg rect X based on alignment
+      let bgX
+      if (align === 'center') bgX = x - metrics.width / 2 - padX
+      else if (align === 'right') bgX = x - metrics.width - padX
+      else bgX = x - padX
+      const bgY = y - fontSize / 2 - padY
+      const bgW = metrics.width + padX * 2
+      const bgH = fontSize + padY * 2
+      ctx.fillStyle = bgColor
+      if (bgShape === 'rounded' && ctx.roundRect) {
+        const r = Math.min(TEXT_BG_ROUND_RADIUS * (W / 1080), bgH / 2)
+        ctx.beginPath()
+        ctx.roundRect(bgX, bgY, bgW, bgH, r)
+        ctx.fill()
+      } else {
+        ctx.fillRect(bgX, bgY, bgW, bgH)
+      }
+    }
+    ctx.fillStyle = color
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'
+    ctx.shadowBlur = 3
+    ctx.shadowOffsetX = 1
+    ctx.shadowOffsetY = 1
+    ctx.fillText(stroke.text, x, y)
+    ctx.restore()
+    return
+  }
+
   const pts = stroke.points.map((p) => ({ x: p.x * W, y: p.y * H }))
   if (pts.length < 2) return
 
@@ -58,6 +107,53 @@ export function drawAnnotationsOnto(ctx, strokes, rx, ry, rw, rh) {
   ctx.clip()
 
   strokes.forEach((stroke) => {
+    // Text strokes
+    if (stroke.type === 'text') {
+      const x = rx + stroke.x * rw
+      const y = ry + stroke.y * rh
+      const fontSize = (stroke.fontSize || TEXT_DEFAULT_SIZE) * (rw / 1080)
+      const fontFamily = stroke.fontFamily || TEXT_DEFAULT_FONT
+      const color = stroke.color || TEXT_DEFAULT_COLOR
+      const bgColor = stroke.bgColor || 'transparent'
+      const align = stroke.textAlign || 'left'
+      const dir = stroke.direction || 'ltr'
+      const bgShape = stroke.bgShape || 'rounded'
+      ctx.save()
+      ctx.font = `bold ${fontSize}px "${fontFamily}", sans-serif`
+      ctx.textBaseline = 'middle'
+      ctx.textAlign = align
+      ctx.direction = dir
+      if (bgColor && bgColor !== 'transparent') {
+        const metrics = ctx.measureText(stroke.text)
+        const padX = fontSize * 0.25
+        const padY = fontSize * 0.15
+        let bgX
+        if (align === 'center') bgX = x - metrics.width / 2 - padX
+        else if (align === 'right') bgX = x - metrics.width - padX
+        else bgX = x - padX
+        const bgY = y - fontSize / 2 - padY
+        const bgW = metrics.width + padX * 2
+        const bgH = fontSize + padY * 2
+        ctx.fillStyle = bgColor
+        if (bgShape === 'rounded' && ctx.roundRect) {
+          const r = Math.min(TEXT_BG_ROUND_RADIUS * (rw / 1080), bgH / 2)
+          ctx.beginPath()
+          ctx.roundRect(bgX, bgY, bgW, bgH, r)
+          ctx.fill()
+        } else {
+          ctx.fillRect(bgX, bgY, bgW, bgH)
+        }
+      }
+      ctx.fillStyle = color
+      ctx.shadowColor = 'rgba(0,0,0,0.5)'
+      ctx.shadowBlur = 3
+      ctx.shadowOffsetX = 1
+      ctx.shadowOffsetY = 1
+      ctx.fillText(stroke.text, x, y)
+      ctx.restore()
+      return
+    }
+
     const pts = stroke.points.map((p) => ({
       x: rx + p.x * rw,
       y: ry + p.y * rh,
